@@ -1,0 +1,2361 @@
+---
+title: "Aspirin Eligibility for Primary Prevention Among US Adults Aged 40-50 according to PREVENT vs PCE"
+format: 
+  html:
+    toc: true
+    toc-expand: true
+    toc-location: body
+date: 12-15-2024
+theme: lightly
+author:
+  - name: "Ahmed Sayed (asu.ahmed.sayed@gmail.com)"
+    affiliations: "Houston Methodist DeBakey Heart & Vascular Center"
+embed-resources: true
+toc-title: Contents
+page-layout: full
+code-fold: true
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Libraries
+
+```{r}
+#Load libs
+packs <- c("data.table", "dplyr", 
+           "stringr", "haven", "PooledCohort",
+           "ggplot2", "scales",  "survey",
+           "flextable", "ggsci", "ggthemes",
+           "scales"
+           )
+lapply(packs, require, character.only = TRUE)
+options(survey.lonely.psu = "adjust")
+```
+
+## Self-made functions
+
+### Analytic
+
+```{r}
+#Quantiles
+qs <- function(variable) quantile(variable, seq(0, 1, 0.05), na.rm = T)
+
+#Functions to create PE/CI
+make_pe_ci_mil <- function(pe, lci, uci) {
+  paste0(pe %>% tomil,
+         " [", lci %>% tomil, " to ", uci %>% tomil, "]") %>% str_replace("\\[ ", "\\[")
+}
+
+make_pe_ci <- function(pe, lci, uci, round_n = 1) {
+  paste0(pe %>% round(round_n) %>% format(nsmall = round_n),
+         " [", lci %>% round(round_n) %>% format(nsmall = round_n), " to ", uci %>% round(round_n) %>% format(nsmall = round_n), "]") %>% str_replace("\\[ ", "\\[")
+}
+
+make_prop_pe_ci <- function(prop_pe, prop_lci, prop_uci) {
+paste0( (100*prop_pe) %>% r1,
+                                " [", (100*prop_lci) %>% r1, " to ", (100*prop_uci) %>% r1, "]") %>% str_replace("\\[ ", "\\[")
+}
+
+make_prop_pe_ci_pct <- function(prop_pe, prop_lci, prop_uci) {
+  paste0( (100*prop_pe) %>% r1,
+          "% [95%CI: ", (100*prop_lci) %>% r1, " to ", (100*prop_uci) %>% r1, "%]") %>%
+    str_replace("\\[ ", "\\[")
+  
+}        
+
+
+#Function to rename columns. Please note that this is a more general function not intended purely for this analysis and therefore contains other variables irrelevant to it.
+nhanes_rename <- function(x) { x %>% rename(any_of(c(
+  #Survey cycle and demographics
+  "survey_cycle" = "SDDSRVYR",
+  "age" = "RIDAGEYR",
+  "sex" = "RIAGENDR",
+  "race" = "RIDRETH3",
+  #Medical conditions
+  "htn" = "BPQ020",
+  "dyslipid" = "BPQ080",
+  "dm" = "DIQ010",
+  "pre_dm" = "DIQ160",
+  "chd" = "MCQ160C",
+  "angina" = "MCQ160D",
+  "mi" = "MCQ160E",
+  "stroke" = "MCQ160F",
+  "smoke_100" = "SMQ020",
+  "smoke_now" = "SMQ040",
+  "cancer" = "MCQ220",
+  "dialysis" = "KIQ025",
+  "failing_kidney" = "KIQ022",
+  "hf" = "MCQ160B",
+  #Medical recommendations
+  "salt_adv_take" = "MCQ371C",
+  "chol_meds_adv" = "BPQ090D",
+  "chol_meds_take" = "BPQ100D",
+  "htn_meds_adv" = "BPQ040A",
+  "htn_meds_take" = "BPQ050A",
+  "aspirin_adv" = "RXQ510",
+  "aspirin_adv_take" = "RXQ515",
+  "aspirin_indep" = "RXQ520",
+  #Exam data
+  "sbp_1" = "BPXOSY1",
+  "sbp_2" = "BPXOSY2",
+  "sbp_3" = "BPXOSY3",
+  "sbp_1" = "BPXSY1",
+  "sbp_2" = "BPXSY2",
+  "sbp_3" = "BPXSY3",
+  "dbp_1" = "BPXODI1",
+  "dbp_2" = "BPXODI2",
+  "dbp_3" = "BPXODI3",
+  "dbp_1" = "BPXDI1",
+  "dbp_2" = "BPXDI2",
+  "dbp_3" = "BPXDI3",
+  "bmi" = "BMXBMI",
+  #Lab values
+  "fasting_glucose" = "LBXGLU",
+  "hba1c" = "LBXGH",
+  "apo_b" = "LBXAPB",
+  "ldl" = "LBDLDL",
+  "ldl_mh" = "LBDLDLM",
+  "ldl_nih" = "LBDLDLN",
+  "tg" = "LBXTR",
+  "hdl" = "LBDHDD",
+  "tc" = "LBXTC",
+  "creatinine" = "LBXSCR",
+  "urine_creatinine" = "URXUCR",
+  "urine_albumin" = "URXUMS",
+  "platelets" = "LBXPLTSI"
+)))
+}
+
+
+#Import an nhanes file given an NHANES folder and file
+import_nhanes <- function(nhanes_pair) {
+          
+          #State directory of files
+          files <- dir(paste0(nhanes_dir, nhanes_pair[1])) %>%
+            #P_I and #_I select 2015-2020 data
+            str_subset("P_|_I")
+          
+          
+          #Import files in a given subfolder (lapply is not needed here, but it is made to be more general in case you need more than 1 file a year)
+          lapply(files,
+                 function(file) {
+                    
+                    #Read the file
+                    data <- read_xpt(file = paste0(nhanes_dir, 
+                                                   nhanes_pair[1], "/", 
+                                                   file)
+                                     )
+                    #Rename columns
+                    data <- nhanes_rename(data)
+                    
+                    #If meds, start command to join medications together
+                    if(nhanes_pair[2] == "meds") {
+                      
+                      #Join medications together
+                      if("RXDDRUG" %in% colnames(data)) {
+                        data <- data %>%
+                          group_by(SEQN) %>%
+                          summarise(drug_names = paste(RXDDRUG, collapse = "; "),
+                                    drug_reasons = paste0(RXDRSC1, RXDRSC2,
+                                                          RXDRSC3, collapse = "; ")
+                                    )
+                        
+                      } else if("RXD240B" %in% colnames(data)) {
+                        
+                        data <- data %>%
+                          group_by(SEQN) %>%
+                          summarise(drug_names = paste(RXD240B, collapse = "; "),
+                                    )
+                      }
+                    }
+                    
+                    #Return the object
+                    data
+                   
+                 }
+                    
+          ) %>%
+            #Use rbindlist in case you are importing several years at once
+            rbindlist(fill = T) -> data
+          
+          
+}
+
+#Convert 1/0 binaries
+convert_10 <- function(x) ifelse(x == 1, "yes", "no") %>% factor
+
+
+#Convert variables coded as 1279 in NHANES to Yes/No
+convert_1279 <- function(variable, yes_ind = "Yes", no_ind = "No") {
+  fcase(variable == 1, yes_ind,
+        variable == 2, no_ind)
+}
+
+#Convert variables coded as 123479 in NHANES to Yes/No (this is for aspirin use)
+convert_123479 <- function(variable, yes_ind = "Yes", no_ind = "No") {
+  fcase(variable %in% c(1, 3), yes_ind,
+        variable %in% c(2, 4), no_ind)
+}
+
+
+#Convert race for PCE (White and Black only; everyone is assigned to White if they're not Black)
+convert_race_pce <-  function(variable) {
+  fcase(variable %in% c(1, 2, 3, 6, 7), "white",
+        variable == 4, "black"
+        )
+}
+
+#Convert race
+convert_race_complete <-  function(variable) {
+  fcase(variable %in% c(1, 2), "Hispanic",
+        variable == 3, "Non-Hispanic White",
+        variable == 4, "Non-Hispanic Black",
+        variable == 6, "Non-Hispanic Asian",
+        variable == 7, "Other (including multiracial)"
+        )
+}
+
+#Function to indicate if drug was taken
+find_drug <- function(drugs_column, drug_string, yes_ind = "Yes", no_ind = "No") {
+  fifelse(str_detect(drugs_column, drug_string), yes_ind, no_ind)
+}
+
+#Function to indicate if indication is present
+find_ind <- function(inds_column, ind_string, yes_ind = "Yes", no_ind = "No") {
+  fifelse(str_detect(inds_column, ind_string), yes_ind, no_ind)
+}
+
+
+#Create a function to get survey means and CIs
+svymean_df <- function(design, variables) {
+  
+  #Get chosen variables in the form of "or"
+  variables[2] %>%
+    #Convert to character
+    paste0 %>%
+    #Replace + with or
+    str_replace_all("\\+", "\\|") %>%
+    #Squish together
+    str_replace_all(" \\| ", "\\|") -> chosen_vars
+  
+  #Get the part of svymean's name that corresponds to the variable name
+  svymean(design = design, variables, na.rm = T) %>%
+    names %>%
+    str_extract(chosen_vars) -> chosen_vars
+  
+  
+  #Produce data.table containing the information on totals
+  data.table(
+    #Variable
+    var = chosen_vars,
+    #Variable level
+    #Total
+    pe = svymean(design = design, variables, na.rm = T) %>%
+      data.frame %>%
+      {.$mean},
+    #LCI
+    lci = svymean(design = design, variables, na.rm = T) %>% confint %>% data.frame %>% {.$X2.5..},
+    #UCI
+    uci = svymean(design = design, variables, na.rm = T) %>% confint %>% data.frame %>% {.$X97.5..}
+  ) -> mean_df
+  
+  
+  #Add PE/CI col
+  mean_df[, pe_ci := make_pe_ci(pe, lci, uci)]
+  
+  #Return
+  print(mean_df)
+  
+}
+
+#Create a function to neatly get survey totals/proportions and confidence intervals
+svytotal_df <- function(design, variables) {
+  
+  #Get chosen variables in the form of "or"
+  variables[2] %>%
+    #Convert to character
+    paste0 %>%
+    #Replace + with or
+    str_replace_all("\\+", "\\|") %>%
+    #Squish together
+    str_replace_all(" \\| ", "\\|") -> chosen_vars
+  
+  #Get the part of svytotal's name that corresponds to the variable name
+  svytotal(design = design, variables, na.rm = T) %>%
+    names %>%
+    str_extract(chosen_vars) -> chosen_vars
+  
+  #Get the part of svytotal's name that corresponds to the variable value
+  svytotal(design = design, variables, na.rm = T) %>%
+    names %>%
+    str_remove_all(chosen_vars) -> chosen_vars_levels
+  
+  #Produce data.table containing the information on totals
+  data.table(
+    #Variable
+    var = chosen_vars,
+    #Variable level
+    value = chosen_vars_levels,
+    #Total
+    pe = svytotal(design = design, variables, na.rm = T) %>%
+      data.frame %>%
+      {.$total},
+    #LCI
+    lci = svytotal(design = design, variables, na.rm = T) %>% confint %>% data.frame %>% {.$X2.5..},
+    #UCI
+    uci = svytotal(design = design, variables, na.rm = T) %>% confint %>% data.frame %>% {.$X97.5..}
+  ) -> total_df
+  
+  lapply(chosen_vars_levels,
+         function(level) {
+           form <- bquote(~ .(variables[[2]]) == .(level))
+           #Get proportion
+           svyciprop(design = design, 
+          formula = form, na.rm = T
+          ) %>% {data.table(
+               prop_pe = .[1],
+               prop_lci = attr(., "ci") %>% .["2.5%"],
+               prop_uci = attr(., "ci") %>% .["97.5%"]
+             )}
+         }
+  ) %>%
+    rbindlist -> props_df
+  
+  #Bind
+  df <- cbind(total_df, props_df)
+  
+  #Make pe/ci columns
+  df[, pe_ci := make_pe_ci_mil(pe, lci, uci)]
+  df[, prop_pe_ci :=  make_prop_pe_ci(prop_pe, prop_lci, prop_uci)]
+  df[, prop_pe_ci_pct :=  make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci)]
+  
+  #Return
+  df
+  
+}
+
+#Function to bootstrap differences in eligibility
+boot_diff <- function(survey_object = sdata_rep, call_var) {
+withReplicates(
+  design = survey_object,
+  return.replicates = T,
+  theta = call_var
+) -> rep_result
+
+  #Collect
+  data.table(prop_pe = rep_result$theta[1],
+             prop_uci = rep_result$replicates %>% quantile(c(0.975)),
+             prop_lci = rep_result$replicates %>% quantile(c(0.025))
+             ) -> rep_result_df
+  
+  #Calculate absolutes
+  rep_result_df[, pe := prop_pe * sum(survey_object$variables$weight)]
+  rep_result_df[, lci := prop_lci * sum(survey_object$variables$weight)]
+  rep_result_df[, uci := prop_uci * sum(survey_object$variables$weight)]
+  
+  #Return
+  print(rep_result_df)
+}
+
+#Difference (without bootstrap, using a simplifying normality assumption)
+diff_fn <- function(survey_object) {
+svymean(design = survey_object,
+        ~ 
+          I(new_1 == "yes") +
+          I(old_1 == "yes") +
+          I(new_1_mod == "yes")) -> svymean_object
+
+svycontrast(stat = svymean_object,
+            list(diff_new_old = 
+              c(
+                `I(new_1 == "yes")TRUE` = 1,
+                `I(old_1 == "yes")TRUE` = -1
+              ),
+              diff_new_mod_old = 
+                c(
+                  `I(new_1_mod == "yes")TRUE` = 1,
+                  `I(old_1 == "yes")TRUE` = -1
+                )
+            )
+            ) -> svycontrast_object
+
+data.table(prop_pe = svycontrast_object,
+           prop_lci = svycontrast_object %>% confint %>% {.[, 1]},
+           prop_uci = svycontrast_object %>% confint %>% {.[, 2]}) -> result_df
+
+#Calculate absolutes
+result_df[, pe := prop_pe * sum(survey_object$variables$weight)]
+result_df[, lci := prop_lci * sum(survey_object$variables$weight)]
+result_df[, uci := prop_uci * sum(survey_object$variables$weight)]
+result_df[, type := c("all", "mod")]
+
+#Return
+result_df
+}
+
+
+```
+
+### Aesthetic
+
+```{r}
+
+#Create PE (CI) column
+pe_ci <- function(pe = pe, lci = lci, uci = uci, rounding = 2) {
+  paste0(
+    pe  %>% round(rounding) %>% format(nsmall = rounding), " (", 
+    lci %>% round(rounding) %>% format(nsmall = rounding), " to ",
+    uci  %>% round(rounding) %>% format(nsmall = rounding),
+    ")"
+  )
+}
+
+
+#Loop over numeric variables, sex, and binary (Yes/no) variables and summarize
+sum_var <- function(dataset, variable) {
+  #Numeric vars 
+  if(variable %in% numeric_variables) {
+    dataset[, 
+      paste0(median(get(variable), na.rm = T) %>% round(1) %>% format(nsmall = 1),
+             " (", 
+             iqr(get(variable)), ")"
+      )
+    ]
+  } 
+  
+  #Sex
+  else if(variable %>% str_detect("sex|gender")) {
+    paste0(dataset[get(variable) %in% c("female", "Female", "Women", "women"), .N] %>% scales::comma(),
+           " (", (100*dataset[get(variable) %in% c("female", "Female", "Women", "women"), .N]/dataset[, .N]) %>% r1, "%)")
+  }
+  
+  #Binary vars
+  else if(variable %in% binary_variables) {
+    paste0(dataset[get(variable) %in% c("Yes", "yes"), .N] %>% scales::comma(),
+           " (", (100*dataset[get(variable) %in% c("Yes", "yes"), .N]/dataset[, .N]) %>% r1, "%)")
+  }
+}
+
+
+#Get IQRs
+iqr <- function(x, rounding = 1) {
+  paste0(
+    quantile(x, 0.25, na.rm = T) %>% round(rounding) %>% format(nsmall = rounding),
+    " to ",
+    quantile(x, 0.75, na.rm = T) %>% round(rounding) %>% format(nsmall = rounding)
+  )
+  
+}
+
+#Round to 1 decimal and include zero if needed
+r1 <- function(x) {
+  x %>% round(1) %>% format(nsmall = 1)
+}
+
+#Round to 2 decimals and include zero if needed
+r2 <- function(x) {
+  x %>% round(2) %>% format(nsmall = 2)
+}
+
+#Convert to million
+tomil <- function(x) {
+  format(round(x / 1e6, 1), nsmall = 1, trim = T)
+}
+
+#Perform some aesthetic modifications for flextables
+flextable_aes <- function(table, table_title) {
+  
+  #Table font
+  table <- flextable::font(table, fontname = "Times New Roman", part = "all")
+  
+  #Align everything centrally
+  table <- flextable::align(table, align = "center", part = "all")
+  
+  #Table heading
+  table <- flextable::set_caption(table, caption = table_title)
+  
+  #Align footer to the left
+  table <- flextable::align(table, align = "left", part = "footer")
+  
+  
+  #Set Table width
+  table <- flextable::width(table, width = 1.5, unit = "in")
+  
+  #Bold
+  table <- flextable::bold(table, part = "header")
+  
+  #Borders
+  table <- table %>% border_inner %>% border_outer
+  
+  #Print
+  table
+}
+
+
+```
+
+## Import
+
+```{r}
+
+#The lefthand side is the name of the folder in which the respective NHANES data files should be deposited. The lefthand side is the name that will be used for the data.frame in R
+folders_dfs <- list(
+  c("Demographics", "demo"),
+  c("LDL_TG_Measure", "ldl_tg_measure"),
+  c("TC_measure", "tc_measure"),
+  c("HDL_Measure", "hdl_measure"),
+  c("Glycohemoglobin", "hba1c"),
+  c("Fasting_Glucose", "fasting_glucose"),
+  c("BMI", "bmi"),
+  c("BP_Measure", "bp_measure"),
+  c("BP_Chol", "bp_chol"),
+  c("Diabetes", "dm_df"),
+  c("Smoke", "smoke_df"),
+  c("Urine albumin and creatinine", "urine_alb_cr"),
+  c("Medical Conditions", "med_conds"),
+  c("Biochem Profile", "biochem"),
+  c("Aspirin", "aspirin"),
+  c("Meds", "meds"),
+  c("CBC", "cbc"),
+  c("Kidney", "kidney"),
+  c("Insurance", "insurance")
+)
+
+#Get NHANES directory
+nhanes_dir <- "C:/Ahmed's Stuff/ResearchStuff/NHANES_Data/"
+
+#Lapply to import NHANES data for a given set of variables
+lapply(folders_dfs, function(folder) import_nhanes(folder)) -> data
+
+#Use Reduce to successively merge elements of the data list
+Reduce(function(x, y) merge(x, y, all = T, by = "SEQN"), data) -> data
+
+##TABLE 1 FUNCTION
+table1_create <- function(dataset, variables, table1_title, 
+                          strata_var = NULL, 
+                          p_values = FALSE,
+                          p_values_col_ind = 5,
+                          table_width = 3,
+                          numeric_variables, binary_variables
+) {
+  
+  #Store variable names
+  var_names <- names(variables)
+  
+  
+  #Get overall CCs using the sum_var function
+  lapply(var_names, function(variable) sum_var(dataset, variable)) -> overall_values
+  
+  #Create strata CCs using the same but with an additional layer of looping for strata levels
+  if(!is.null(strata_var)) {
+    
+    #Strata levels  
+    strata_levels <- dataset[, get(strata_var) %>% factor %>% levels]
+    
+    #Apply over levels of strata of interest
+    lapply(1:length(strata_levels),
+           function(i)
+           {
+             stratum <- strata_levels[[i]]
+             #CCs of level 1
+             lapply(var_names, function(variable) sum_var(dataset = dataset[get(strata_var) == stratum], variable)) %>%
+               unlist
+           }
+    ) -> strata_values
+    
+    
+  }
+  
+  
+  #Create data.table containing the relevant variables
+  data.table(
+    variable_names = variables %>% unlist,
+    variable_values = overall_values %>% unlist
+  ) -> table1_df
+  
+  #Create new columns with the corresponding values for each strata
+  if(!is.null(strata_var)) {
+    for(i in 1:length(strata_values)) {
+      table1_df[, paste0("level_", i) := strata_values[[i]]]
+      setnames(table1_df, old = paste0("level_", i), new = strata_levels[i])
+    }
+  }
+  
+  #Get p-values if necessary
+  if(p_values) {
+    #Loop over variables to get test statistics
+    lapply(var_names, 
+           function(var_name) test_var(dataset, variable = var_name, strata_var)) %>% unlist -> pvals
+    table1_df[, p_values := pvals]
+  }
+  
+  #Rename and create a flextable
+  table1_df %>%
+    rename(any_of(c(
+      "Variables" = "variable_names",
+      "Overall" = "variable_values",
+      "P-values*" = "p_values"
+    ))) %>%
+    flextable %>% 
+    flextable_aes(table1_title) %>%
+    bold(j = 1) %>%
+    width(width = table_width) -> table_flex
+  
+  #Add P-value if relevant
+  if(p_values) {
+    table_flex <- footnote(table_flex, 
+             ref_symbols = footnote_symbol(1), 
+             j = p_values_col_ind,
+             value = as_paragraph("P-values were obtained from Wilcoxon test for continuous variables or from a Chi-square test for categorical variables."))
+  }
+  
+  #Produce table
+  table_flex
+}
+```
+
+## Clean & Prep
+
+```{r}
+
+#Convert variables coded as 1, 2, 7, or 9
+columns_1279 <- c("pre_dm", "dm", "htn", "smoke_100",
+                  "chd", "mi", "stroke", "angina", 
+                  "cancer", "htn_meds_adv", "htn_meds_take",
+                  "aspirin_adv", "aspirin_indep", 
+                  "failing_kidney", "dialysis", "hf"
+                  )
+data[, (columns_1279) := lapply(.SD, convert_1279, "yes", "no"), 
+     .SDcols = columns_1279]
+
+#Convert hypertension meds to no if appropriate 
+data[, htn_meds_take := fifelse(htn == "no" | htn_meds_adv == "no", "no", htn_meds_take)]
+
+
+#Denote column containing "Taking aspirin independently"
+data[, aspirin_indep := fcase(
+  aspirin_indep == "yes", "yes",
+  aspirin_adv_take == "no" | aspirin_indep == "no", "no"
+)]
+
+#Denote column for any aspirin use
+data[, aspirin := fcase(
+  aspirin_adv_take == "yes" | aspirin_indep == "yes", "yes",
+  (aspirin_indep == "no") | (aspirin_adv_take == "no" & aspirin_adv == "yes"), "no"
+)]
+
+##Manual checks (to ensure that aspirin has been coded correctly)
+#Yes
+1707+211+128+991 == data[aspirin == "yes", .N]
+#No
+370+51+2151+683+68+3658 == data[aspirin == "no", .N]
+
+#Convert sex
+data[, sex := fcase(
+    sex == 1, "male",
+    sex == 2, "female"
+)]
+
+
+#Build a string for statins
+statin_string <- c("(?i)LOVASTATIN|PRAVASTATIN|FLUVASTATIN|ROSUVASTATIN|PITAVASTATIN|ATORVASTATIN|SIMVASTATIN|CERIVASTATIN")
+
+#Build a string for antiplatelets
+platelet_string <- c("(?i)CLOPIDOGREL|PRASUGREL|TICAGRELOR|TICLOPIDINE|DIPYRIDAMOLE|CILOSTAZOL")
+
+#Build a string for anticoag
+anticoag_string <- c("(?i)APIXABAN|RIVAROXABAN|EDOXABAN|DABIGRAN|ENOXAPARIN|FONDAPARINAUX|HEPARIN|WARFARIN")
+
+#Build a string for steroids
+steroid_string <- c("(?i)CORTISONE|BETAMETHASONE|DEXAMETHASONE|FLUDROCORTISONE|HYDROCORTISONE|METHYLPREDNISOLONE|PREDNISOLONE|PREDNISONE")
+
+#Build a string for NSAIDs
+nsaid_string <- c("(?i)DICLOFENAC|IBUPROFEN|INDOMETHACIN|KETOPROFEN|FENOPROFEN|NAPROXEN|MELOXICAM|KETOROLAC|DIFLUINSAL|MEFENAMIC ACID|TIAPROFENIC ACID")
+
+ssri_string <- c("(?i)CITALOPRAM|ESCITALOPRAM|FLUOXOTINE|FLUVOXAMINE|PAROXETINE|SERTRALINE|VENLAFAXINE|DULOXETINE")
+
+#Indicate drug use
+data[, statin := find_drug(drug_names, statin_string, "yes", "no")]
+data[, ssri := find_drug(drug_names, ssri_string, "yes", "no")]
+data[, nsaid := find_drug(drug_names, nsaid_string, "yes", "no")]
+data[, steroid := find_drug(drug_names, steroid_string, "yes", "no")]
+data[, anticoag := find_drug(drug_names, anticoag_string, "yes", "no")]
+data[, platelet := find_drug(drug_names, platelet_string, "yes", "no")]
+
+#GI Ulcers
+gi_ulcer_string <- c("(?i)K25|K27")
+data[, gi_ulcer := find_ind(drug_reasons, gi_ulcer_string, "yes", "no")]
+data[gi_ulcer == "yes", drug_names]
+
+#Convert race
+data[, race_pce := convert_race_pce(race)]
+data[, race := convert_race_complete(race)]
+data[, black := fifelse(race == "Non-Hispanic Black", "yes", "no")]
+data[, hispanic := fifelse(race == "Hispanic", "yes", "no")]
+data[, asian := fifelse(race == "Asian", "yes", "no")]
+
+
+#Convert current smoking habits
+data[, smoke_now := fcase(
+  smoke_now == 1, "yes",
+  smoke_now == 2, "yes",
+  smoke_now == 3, "no",
+  smoke_100 == "no", "no"
+)]
+
+#Create obesity
+data[, obesity := fifelse(bmi >= 30, "yes", "no")]
+
+#Calcualte avg systolic and diastolic BP
+data[, sbp := (sbp_1 + sbp_2 + sbp_3)/3]
+data[, dbp := (dbp_1 + dbp_2 + dbp_3)/3]
+
+#Define DM
+data[, dm := fcase(
+  hba1c >= 6.5, "yes",
+  fasting_glucose >= 126, "yes",
+  dm == "yes", "yes",
+  dm == "no", "no"
+  )]
+
+#Calculate sex-specific constants for eGFR estimation
+data[, alpha := fifelse(sex == "male", -0.302, -0.241)]
+data[, k := fifelse(sex == "male", 0.9, 0.7)]
+data[, constant := fifelse(sex == "male", 1, 1.012)]
+
+#Calculate eGFR
+data[, egfr :=
+    142 *
+    (pmin(creatinine/k, 1)^alpha) *
+    (pmax(creatinine/k, 1)^-1.2) *
+    (0.9938^age) *
+    constant
+    ]
+
+
+#Create albumin/creatinine ratio
+data[, uacr := urine_albumin/(10*urine_creatinine/1000)]
+
+```
+
+## Calculate risk
+
+```{r}
+
+#Create capped versions of variables
+data[, tc_cap := fcase(
+  tc < 130, 130,
+  tc > 320, 320,
+  rep(TRUE, .N), tc
+)]
+data[, sbp_cap := fcase(
+  sbp < 90, 90,
+  sbp > 200, 200,
+  rep(TRUE, .N), sbp
+)]
+
+data[, hdl_cap_prevent := fcase(
+  hdl < 20, 20,
+  hdl > 100, 100,
+  rep(TRUE, .N), hdl
+)]
+
+data[, bmi_cap_prevent := fcase(
+  bmi < 18.5, 18.5,
+  bmi > 40, 40,
+  rep(TRUE, .N), bmi
+)]
+
+data[, egfr_cap_prevent := fcase(
+  egfr < 15, 15,
+  egfr > 140, 140,
+  rep(TRUE, .N), egfr
+)]
+
+data[, eligible := fifelse(
+  age >= 30 & age <= 79, 1, 0
+)]
+#Calculate 10-year risk using PREVENT
+data[eligible == 1, prevent_10yr := predict_10yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  equation = "Khan_2023"
+)]
+
+#Calculate 10-year risk using PREVENT
+data[eligible == 1, prevent_30yr := predict_30yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  equation = "Khan_2023"
+)]
+
+
+data[, statin_num := fifelse(statin == "yes", 1, 0)]
+data[, dm_num := fifelse(dm == "yes", 1, 0)]
+data[, smoke_num := fifelse(smoke_now == "yes", 1, 0)]
+data[, htn_meds_num := fifelse(htn_meds_take == "yes", 1, 0)]
+
+
+#Calculate 10-year risk using more expansive PREVENT
+# data[eligible == 1, prevent_10yr_more := predict_10yr_ascvd_risk(
+#   age_years = age,
+#   sex = sex,
+#   bp_sys_mmhg = sbp_cap,
+#   bmi = bmi_cap_prevent,
+#   diabetes = dm,
+#   hba1c = hba1c,
+#   acr = uacr,
+#   bp_meds = htn_meds_take,
+#   chol_total_mgdl = tc_cap,
+#   chol_hdl_mgdl = hdl_cap_prevent,
+#   statin_meds = statin,
+#   smoke_current = smoke_now,
+#   egfr = egfr_cap_prevent,
+#   sdi = NULL,
+#   equation = "Khan_2023",
+#   prevent_type = "base"
+# )]
+
+#Calculate 10-year risk using PCE
+data[age >= 40, pce_10yr := predict_10yr_ascvd_risk(
+  age_years = age,
+  race = race_pce,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  smoke_current = smoke_now,
+  equation = "Goff_2013"
+)]
+
+data[, sdi := NA]
+#Calculate 10-year risk using the full PREVENT equation
+data[age >= 30, prevent_10yr_full := predict_10yr_ascvd_risk(
+  age_years = age,
+  sex = sex,
+  bp_sys_mmhg = sbp_cap,
+  bmi = bmi_cap_prevent,
+  diabetes = dm,
+  bp_meds = htn_meds_take,
+  chol_total_mgdl = tc_cap,
+  chol_hdl_mgdl = hdl_cap_prevent,
+  statin_meds = statin,
+  smoke_current = smoke_now,
+  egfr = egfr_cap_prevent,
+  hba1c = hba1c,
+  acr = uacr,
+  sdi = sdi,
+  equation = "Khan_2023",
+  prevent_type = "full"
+)]
+
+
+#Define CVD
+data[, cvd := fifelse(mi == "yes" | stroke == "yes" | chd == "yes" | angina == "yes" | hf == "yes", 1, 0) %>% convert_10]
+#Define CKD
+data[, ckd := fifelse(uacr >= 30 | egfr <= 60, 1, 0) %>% convert_10]
+
+
+#N Lacking 10-year risk estimates
+lacking_risk_n <- data[(is.na(pce_10yr) | is.na(prevent_10yr)), .N]
+
+```
+
+## Assign CoR
+
+### New
+
+```{r}
+
+
+#>130/80 or 140/90
+data[, new_hard_bp_eligible := fifelse((sbp >= 140 | dbp >= 90), 1, 0)]
+#Clinical CVD SBP > 130 or DBP >= 80
+data[, new_cvd_sbp_eligible := fifelse(cvd == "yes" & (sbp >= 130), 1, 0)]
+data[, new_cvd_dbp_eligible := fifelse(cvd == "yes" & (dbp >= 80), 1, 0)]
+#CKD/DM with BP >130/80
+data[, new_dm_ckd_sbp_eligible := fifelse((dm == "yes" | ckd == "yes") & (sbp >= 130), 1, 0)]
+data[, new_dm_ckd_dbp_eligible := fifelse((dm == "yes" | ckd == "yes") & (dbp >= 80), 1, 0)]
+#>=7.5% with BP >130/80
+data[, new_risk_sbp_eligible := fifelse((prevent_10yr >= 0.075) & (sbp >= 130), 1, 0)]
+data[, new_risk_dbp_eligible := fifelse((prevent_10yr >= 0.075) & (dbp >= 80), 1, 0)]
+#Risk <7.5% but BP >130/80
+data[, new_below_7.5_above_130_80 := fifelse(prevent_10yr < 0.075 & (sbp %between% c(130, 139.9999) | dbp %between% c(80, 89.9999)), 1, 0)]
+
+#Recs by class
+data[, new_1a := pmax(new_hard_bp_eligible,
+                          new_cvd_sbp_eligible,
+                          new_dm_ckd_sbp_eligible,
+                          new_risk_sbp_eligible,
+                      na.rm = T
+)]
+
+data[, new_1br := new_below_7.5_above_130_80]
+
+data[, new_1c := pmax(new_dm_ckd_dbp_eligible,
+                      new_cvd_dbp_eligible,
+                      new_risk_dbp_eligible,
+                      na.rm = T)]
+data[, new_1 := pmax(new_1a, new_1br, new_1c,
+                      na.rm = T)]
+data[, new_1_mod := pmax(new_1a, new_1c,
+                      na.rm = T)]
+
+data[, new_1 := fifelse(new_1 == 0 & 
+                          ((age >= 30 & is.na(prevent_10yr)) | is.na(dm) | is.na(ckd) | is.na(cvd)),
+                        NA, new_1
+                          )]
+data[, new_1_mod := fifelse(new_1_mod == 0 & 
+                          ( (age >= 30 & is.na(prevent_10yr)) | is.na(dm) | is.na(ckd) | is.na(cvd)),
+                        NA, new_1_mod
+                          )]
+
+data[, new_below_7.5_above_130_80_only := new_1 - new_1_mod]
+
+
+```
+
+### Old
+
+```{r}
+#BP
+data[, old_hard_bp_eligible := fifelse((sbp >= 140 | dbp >= 90), 1, 0)]
+#CKD/DM with BP >130/80
+data[, old_dm_ckd_sbp_eligible := fifelse((dm == "yes" | ckd == "yes") & (sbp >= 130), 1, 0)]
+data[, old_dm_ckd_dbp_eligible := fifelse((dm == "yes" | ckd == "yes") & (dbp >= 80), 1, 0)]
+#Age
+data[, old_age_sbp_eligible := fifelse((age >= 65) & (sbp >= 130), 1, 0)]
+#Risk
+data[, old_risk_sbp_eligible := fifelse(pce_10yr >= 0.1 & (sbp >= 130), 1, 0)]
+data[, old_risk_dbp_eligible := fifelse(pce_10yr >= 0.1 & (dbp >= 80), 1, 0)]
+data[, old_10_130_80 := fifelse(pce_10yr <= 0.1 & (sbp %between% c(130, 139.9999) | dbp %between% c(80, 89.99999)), 1, 0)]
+#CVD
+data[, old_cvd_sbp_eligible := fifelse(cvd == "yes" & (sbp >= 130), 1, 0)]
+data[, old_cvd_dbp_eligible := fifelse(cvd == "yes" & (dbp >= 80), 1, 0)]
+
+
+#Class
+data[, old_1a := pmax(old_hard_bp_eligible,
+                      old_age_sbp_eligible,
+                      old_cvd_sbp_eligible,
+                      old_risk_sbp_eligible,
+                      na.rm = T
+)]
+
+
+data[, old_1b := pmax(old_dm_ckd_sbp_eligible,
+                        old_risk_dbp_eligible,
+                      na.rm = T)]
+
+data[, old_1c := pmax(old_cvd_dbp_eligible,
+                        old_risk_dbp_eligible,
+                      old_dm_ckd_dbp_eligible,
+                      na.rm = T)]
+
+data[, old_1 := pmax(old_1a,
+                     old_1b,
+                     old_1c,
+                      na.rm = T
+)]
+
+data[, old_1 := fifelse(old_1 == 0 & 
+                          ( (age >= 40 & is.na(pce_10yr)) | is.na(age) | is.na(dm) | is.na(ckd) | is.na(cvd)),
+                        NA, old_1
+                          )]
+
+
+data[, old_2b := pmax(old_10_130_80)]
+
+
+
+```
+
+### Misc
+
+```{r}
+
+# apply function only to selected columns
+cols_10 <- c("new_1", "new_1a", "new_1br", "new_1c", "new_1_mod",
+             "old_1", "old_1a", "old_1c", "old_2b", "new_below_7.5_above_130_80_only")
+data[, (cols_10) := lapply(.SD, convert_10), .SDcols = cols_10]
+
+#Discordance
+data[, discordant := fifelse(old_1 != new_1, 1, 0) %>% convert_10]
+data[, discordant_mod := fifelse(old_1 != new_1_mod, 1, 0) %>% convert_10]
+data[, discordant_type := fcase(
+  new_1 == "no" & old_1 == "no", "Concordant (no class I recommendation to treat)",
+  new_1_mod == "yes" & old_1 == "yes", "Concordant (class I recommendation to treat)",
+  old_1 == "no" & new_1 == "yes" & new_1_mod == "no" , "Potentially discordant (newly eligible if lifestyle modification trial insufficient)",
+  old_1 == "yes" & new_1 == "yes" & new_1_mod == "no" , "Potentially discordant (ineligible if lifestyle modification trial successful)",
+  new_1 == "no" & old_1 == "yes", "Discordant (no longer has class I recommendation to treat)",
+  new_1_mod == "yes" & old_1 == "no", "Discordant (new class I recommendation to treat)"
+) %>% factor]
+data$discordant_type %>% unique
+data[, discordant_up := fifelse(new_1 == "yes" & old_1 == "no",
+                                "yes",
+                                fifelse(new_1 == "no" & old_1 == "no", "no", NA)
+                                ) %>% factor]
+data[, discordant_down := fifelse(new_1 == "no" & old_1 == "yes",
+                                "yes",
+                                fifelse(new_1 == "yes" & old_1 == "yes", "no", NA)
+                                ) %>% factor]
+
+
+data[, max_grade := fcase(
+  new_1a == "yes", "1a", 
+  new_1br == "yes", "1b",
+  new_1c == "yes", "1c"
+  ) %>% factor]
+
+#BP Category
+data[, bp_cat := fcase(
+  sbp >= 130 | dbp >= 80, "SBP ≥130 or DBP ≥80 (Intensification to reach <130/80 is recommended)",
+  sbp >= 120, "120-129/<80 (Intensification to reach <120/80 is preferred)",
+  sbp <= 120, "At preferred target (<120/80)" 
+) %>% factor]
+data[, bp_cat := factor(bp_cat, 
+                        levels = 
+                          c(
+                            "SBP ≥130 or DBP ≥80 (Intensification to reach <130/80 is recommended)",
+                            "120-129/<80 (Intensification to reach <120/80 is preferred)",
+                            "At preferred target (<120/80)" 
+                          )
+                          )]
+
+#Old/new 1
+data$old_1_new_1_mod <- interaction(data$old_1, data$new_1_mod)
+data$old_1_new_1 <- interaction(data$old_1, data$new_1)
+
+
+```
+
+## Convert to a survey object
+
+```{r}
+
+#Adjust survey weights to reflect proportion of data from each cycle
+#Adjust survey weights to reflect proportion of data from each cycle
+data[survey_cycle == 9, weight := WTMEC2YR * 2/5.2] 
+data[survey_cycle == 66, weight := WTMECPRP * 3.2/5.2] 
+data[is.na(weight), weight := 0]
+
+
+#Make survey object out of x
+sdata <- svydesign(data = data,
+                ids = data$SDMVPSU,
+                strata = data$SDMVSTRA,
+                weights = data$weight,
+                nest = TRUE)
+
+bp_exclusion <- expr(is.na(sbp) | is.na(dbp))
+age_exclusion <- expr(age < 20)
+
+missing_age_n <- data[eval(age_exclusion), .N]
+missing_bp_n <- data[!eval(age_exclusion)][eval(bp_exclusion) & weight > 0, .N]
+missing_rec_exclusion <- data[!eval(age_exclusion)][!eval(bp_exclusion) & weight > 0][(is.na(new_1) | is.na(old_1) | is.na(new_1_mod)) & weight > 0, .N]
+
+#Subset to primary prevention aspirin-eligible patients
+subset(sdata, 
+       subset = 
+         #Limit to 20+
+         age >= 20 &
+         #Exclude if unavailable class I recommendation
+         !is.na(old_1) & !is.na(new_1) & !is.na(new_1_mod)
+         ) -> sdata
+
+```
+
+# Analyze
+
+## Create Table 1
+
+```{r}
+
+
+
+```
+
+## Better Table 1
+
+```{r}
+# wtd_median_iqr <- function(var, wt, rounding = 0) {
+#   paste0(round(wtd.quantile(var, weights = wt, na.rm = T)[3], rounding) %>% format(nsmall = rounding),
+#          " (", round(wtd.quantile(var, weights = wt, na.rm = T)[2], rounding) %>% format(nsmall = rounding),
+#          " to ",
+#          round(wtd.quantile(var, weights = wt, na.rm = T)[4], rounding) %>% format(nsmall = rounding),
+#          ")")
+# }
+# library(Hmisc)
+# list(c("Age (years)", sdata$variables[, wtd_median_iqr(age, weight)]),
+#      c("Proportion of women (%)", sdata$variables[, sum(weight[sex == "female"]/sum(weight))] %>% {r1(.*100)}),
+#      c("Race/Ethnicity (%)", ""),
+#      c("   Non-Hispanic White", sdata$variables[, sum(weight[race == "Non-Hispanic White"]/sum(weight))] %>% {r1(.*100)}),
+#      c("   Non-Hispanic Black", sdata$variables[, sum(weight[race == "Non-Hispanic Black"]/sum(weight))] %>% {r1(.*100)}),
+#      c("   Hispanic", sdata$variables[, sum(weight[race == "Hispanic"]/sum(weight))] %>% {r1(.*100)}),
+#      c("   Non-Hispanic Asian", sdata$variables[, sum(weight[race == "Hispanic"]/sum(weight))] %>% {r1(.*100)}),
+#      c("   Other (including multiracial)", sdata$variables[, sum(weight[race == "Other (including multiracial)"]/sum(weight))] %>% {r1(.*100)}),
+#      c("Body mass index (kg/m2)", sdata$variables[!is.na(bmi), wtd_median_iqr(bmi, weight, 1)]),
+#      c("Systolic Blood pressure (mmHg)", sdata$variables[!is.na(sbp), wtd_median_iqr(sbp, weight, 0)]),
+#      c("Diastolic Blood pressure (mmHg)", sdata$variables[!is.na(dbp), wtd_median_iqr(dbp, weight, 0)]),
+#      c("HbA1c (%)", sdata$variables[!is.na(hba1c), wtd_median_iqr(hba1c, weight, 1)]),
+#      c("Low-density lipoprotein cholesterol (mg/dL)", sdata$variables[!is.na(ldl), wtd_median_iqr(ldl, weight, 0)]),
+#      c("Total cholesterol (mg/dL)", sdata$variables[!is.na(tc), wtd_median_iqr(tc, weight, 0)]),
+#      c("High-density lipoprotein cholesterol (mg/dL)", sdata$variables[!is.na(hdl), wtd_median_iqr(hdl, weight, 0)]),
+#      c("Non-High-density lipoprotein cholesterol (mg/dL)", sdata$variables[!is.na(hdl) & !is.na(tc), wtd_median_iqr(tc - hdl, weight, 0)]),
+#      c("Triglycerides (mg/dL)", sdata$variables[!is.na(ldl), wtd_median_iqr(tg, weight, 0)]),
+#      c("Obesity (%)", sdata$variables[!is.na(bmi), sum(weight[bmi >= 30]/sum(weight))] %>% {r1(.*100)}),
+#      c("Diabetes (%)", sdata$variables[!is.na(dm), sum(weight[dm == "yes"]/sum(weight))] %>% {r1(.*100)}),
+#      c("Hypertension (%)", sdata$variables[!is.na(htn), sum(weight[htn == "yes"]/sum(weight))] %>% {r1(.*100)}),
+#      c("Aspirin use (%)", sdata$variables[!is.na(aspirin), sum(weight[aspirin == "yes"]/sum(weight))] %>% {r1(.*100)})
+# ) %>% 
+#   {tibble(
+#     `Variable` = lapply(., "[[", 1) %>% unlist,
+#     `Value` = lapply(., "[[", 2) %>% unlist
+#   )} -> baseline_table
+# 
+# flextable(baseline_table) %>%
+#   border_inner %>%
+#   border_outer %>%
+#   merge_h %>%
+#   bold(i = 1, part = "header") %>%
+#   bold(j = 1) %>%
+#   set_caption(caption = as_paragraph(paste0("Table 1. Baseline characteristics of survey respondents aged 40-59 without a history of atherosclerotic cardiovascular disease or major bleeding risk factors (N = ", sdata$variables[, .N] %>% comma, ")"))) %>%
+#   font(fontname = "Times New Roman") %>%
+#   width(width = 3.5) %>%
+#   save_as_docx(path = "Tables/Table 1.docx")
+
+```
+
+## Function to get totals
+
+```{r}
+get_svytotals <- function(design = sdata, var, n_cats = 2) {
+#Get total number of eligible patients (10%+) according to PREVENT
+list(
+  #Overall
+  " " = svytotal_df(design = design, 
+                    variables = var) %>% mutate(group = "Overall"),
+  #Age-stratified
+  "Below 40" = svytotal_df(design = subset(design, age < 40), 
+                        variables = var) %>% mutate(group = "Age (years)"),
+  "40-64" = svytotal_df(design = subset(design, age %between% c(40, 64)), 
+                        variables = var) %>% mutate(group = "Age (years)"),
+  "65 or older" = svytotal_df(design = subset(design, age >= 65), 
+                        variables = var) %>% mutate(group = "Age (years)"),
+  #Sex-stratified
+  "Female" = svytotal_df(design = subset(design, sex == "female"), 
+                         variables = var) %>% mutate(group = "Sex"),
+  "Male" = svytotal_df(design = subset(design, sex == "male"), 
+                       variables = var) %>% mutate(group = "Sex"),
+  #Race-stratified
+  "NH Black" = svytotal_df(design = subset(design,  race == "Non-Hispanic Black"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  "NH White" = svytotal_df(design = subset(design,  race == "Non-Hispanic White"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  "NH Asian" = svytotal_df(design = subset(design, race == "Non-Hispanic Asian"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  "Hispanic" = svytotal_df(design = subset(design, race == "Hispanic"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  #Comorbidities
+  "CKD" = svytotal_df(design = subset(design, ckd == "yes"), 
+                               variables = var) %>% mutate(group = "Comorbidities"),
+  "Obesity" = svytotal_df(design = subset(design, obesity == "yes"), 
+                          variables = var) %>% mutate(group = "Comorbidities"),
+  "Diabetes" = svytotal_df(design = subset(design, dm == "yes"), 
+                           variables = var) %>% mutate(group = "Comorbidities"),
+  "CVD" = svytotal_df(design = subset(design, cvd == "yes"), 
+                           variables = var) %>% mutate(group = "Comorbidities")
+) %>% 
+  #Bind together
+  {data.table(rbindlist(.) %>% select(-var),
+              stratum = names(.) %>% rep(each = n_cats))} -> df
+  
+}
+
+
+
+```
+
+##Extract relevant subgroups
+
+```{r}
+subsets_calls_list <- list(
+  quote(design),
+  quote(subset(design, age < 40)),
+  quote(subset(design, age %between% c(40, 64))),
+  quote(subset(design, age >= 65)),
+  quote(subset(design, sex == "female")),
+  quote(subset(design, sex == "male")),
+  quote(subset(design, race == "Non-Hispanic Black")),
+  quote(subset(design, race == "Non-Hispanic White")),
+  quote(subset(design, race == "Non-Hispanic Asian")),
+  quote(subset(design, race == "Hispanic")),
+  quote(subset(design, ckd == "yes")),
+  quote(subset(design, obesity == "yes")),
+  quote(subset(design, dm == "yes")),
+  quote(subset(design, cvd == "yes"))
+)
+
+```
+
+## Eligible for initiation
+
+### Get numbers
+
+```{r}
+get_svytotals(design = subset(sdata, htn_meds_take == "no"), var = ~ new_1) -> new_1_df
+get_svytotals(design = subset(sdata, htn_meds_take == "no"), var = ~ old_1) -> old_1_df
+get_svytotals(design = subset(sdata, htn_meds_take == "no"), var = ~ new_1_mod) -> new_1_mod_df
+# get_svytotals(design = subset(sdata, htn_meds_take == "no"), var = ~ new_below_7.5_above_130_80_only) -> new_below_7.5_above_130_80_df
+
+
+
+#Get differences in initiation eligibility
+lapply(
+  subsets_calls_list,
+  function(subset_call) {
+    diff_fn(survey_object = eval(subset_call, 
+                                 envir = list(design = sdata %>%
+            subset(htn_meds_take == "no"))
+          ) 
+    )
+  }) -> abs_diff_init_df
+abs_diff_init_df <- rbindlist(abs_diff_init_df)
+abs_diff_init_df[, stratum := new_1_df$stratum]
+
+new_1_title <- "2025 ACC/AHA guidelines (assuming lifestyle changes insufficient for PREVENT-based risk <7.5% and BP of 130-139/80-89)"
+
+new_1_mod_title <- "2025 ACC/AHA guidelines (assuming lifestyle changes sufficient for PREVENT-based risk <7.5% and BP of 130-139/80-89)"
+
+old_1_title <- "2017 ACC/AHA guidelines"
+
+rbind(new_1_df %>% mutate(type = new_1_title),
+      new_1_mod_df %>% mutate(type = new_1_mod_title),
+      old_1_df %>% mutate(type = old_1_title)
+      ) -> eligibility_df
+eligibility_df[, group := paste0(group, ".")]
+
+```
+
+### Plot
+
+```{r}
+library(legendry)
+eligibility_df[, stratum_group := interaction(stratum, group)]
+eligibility_df[, stratum_group := factor(stratum_group,
+                                         levels = eligibility_df$stratum_group %>%
+                                           unique)]
+
+#Plot
+ggplot(data = eligibility_df[value == "yes"],
+       aes(y = prop_pe,
+           ymin = prop_lci,
+           ymax = prop_uci,
+           x = stratum_group,
+           fill = type,
+           group = type
+           )) +
+  geom_col(position = position_dodge(width = 0.7),
+           width = 0.7) +
+  geom_errorbar(width = 0.5, lwd = 1,
+                position = position_dodge(width = 0.7)) +
+  #Plot scales
+    scale_x_discrete(name = NULL
+                     ) +
+  scale_y_continuous(name = "Eligible proportion (%)",
+                     breaks = seq(0, 1, 0.05),
+                     expand = c(0, 0),
+                     labels = function(x) (x * 100) 
+                     ) +
+  scale_fill_jama(name = NULL) +
+  guides(x = legendry::guide_axis_nested(key = key_range_auto("\\."))) +
+  #Title
+  ggtitle("Proportion of US adults eligible for initiating pharmacological treatment of hypertension according to the 2017 and 2025 ACC/AHA guidelines",
+          subtitle = "Bars represent estimated proportions and error bars represent 95% confidence intervals.") +
+    theme_bw() +
+    theme(title = element_text(size = 12, face = "bold"),
+          plot.subtitle = element_text(face = "bold", size = 13, hjust = 0.0, color = "grey45"),
+        text = element_text(size = 14, face = "bold"),
+        axis.title.x = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(size = 18, face = "bold"),
+        axis.text = element_text(size = 16, face = "bold"),
+        legend.position = "bottom",
+        legend.key = element_rect(fill = "transparent"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size = 14, face = "bold"),
+        legend.title = element_text(size = 17, face = "bold"),
+        legend.key.width = unit(2, "cm")
+        ) +
+  coord_cartesian(
+    ylim = c(0, 0.6)
+  ) +
+  guides(fill = guide_legend(nrow = 3)) -> eligible_prop_fig
+
+#Predicted risks
+ggsave(eligible_prop_fig,
+       filename = "Figures/New vs Old eligible.pdf",
+       dpi = 600,
+       width = 16, height = 9
+       )
+```
+
+###Tabulate
+
+```{r}
+
+
+
+
+#Apply over dfs
+lapply(list(old_1_df, new_1_df, new_1_mod_df,
+            abs_diff_init_df),
+       function(df)
+       {
+         df[, pe_ci := make_pe_ci_mil(pe, lci, uci)]
+         df[, prop_pe_ci :=  make_prop_pe_ci(prop_pe, prop_lci, prop_uci)]
+         df[, prop_pe_ci_pct :=  make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci)] 
+       } 
+       )
+
+
+abbs_line <- "ACC: American College of Cardiology; AHA: American Heart Association; CVD: Cardiovascular disease; CKD: Chronic kidney disease"
+
+#Tabulate
+cbind(
+  #Old
+  old_1_df[value == "yes", .(`Variable` = group,
+                            `Strata` = stratum,
+                            `Proportion [95% CI], % ` = prop_pe_ci,
+                            `Number [95% CI], millions ` = pe_ci)],
+  #New, mod
+  new_1_mod_df[value == "yes", .(`Proportion [95% CI], %` = prop_pe_ci,
+                            `Number [95% CI], millions` = pe_ci)],
+  abs_diff_init_df[type == "mod", .(`Difference vs 2017 guidelines, % [95% CI]` = prop_pe_ci,
+                                    `Difference vs 2017 guidelines, millions [95% CI]` = pe_ci
+                                    )],
+  #New, all
+  new_1_df[value == "yes", .(
+                            `Proportion [95% CI], %  ` = prop_pe_ci,
+                            `Number [95% CI], millions  ` = pe_ci)],
+  abs_diff_init_df[type == "all", .(`Difference vs 2017 guidelines, % [95% CI] ` = prop_pe_ci,
+                                    `Difference vs 2017 guidelines, millions [95% CI] ` = pe_ci
+                                    )]
+) %>%
+  flextable %>%
+  bold(j = c(1, 2)) %>%
+  add_header_row(values = c(
+    "",
+    "Eligible for treatment by the 2017 ACC/AHA guidelines",
+    "Eligible for immediate treatment by the 2025 ACC/AHA guidelines",
+    "Eligible for treatment by the 2025 ACC/AHA guidelines if lifestyle modification proves insufficient to reduce BP <130/80"
+  ),
+  colwidths = c(2, 2, 4, 4)
+             ) %>%
+  flextable_aes(table_title = "Table 1. US adults not currently taking medications to lower blood pressure eligible for pharmacological treatment, according to the 2017 and 2025 ACC/AHA guidelines.") %>%
+  merge_v() %>%
+  fontsize(size = 9) %>%
+  width(width = 0.9) %>%
+  add_footer_lines(values = as_paragraph(abbs_line)) %>%
+  save_as_docx(path = "Tables/Table 1.docx")
+
+
+```
+
+
+
+## Initiation Concordance/discordance
+
+### Get numbers
+
+```{r}
+# get_svytotals(var = ~ discordant) -> discordant_df
+# get_svytotals(var = ~ discordant_mod) -> discordant_mod_df
+get_svytotals(design = subset(sdata, htn_meds_take == "no"),
+              var = ~ discordant_type, n_cats = 4) -> discordant_df
+discordant_df[group == "Overall", ]
+
+discordant_df[, group := paste0(group, ".")]
+discordant_df[, value := factor(value,
+                                c("Concordant (no class I recommendation to treat)",
+                                  "Concordant (class I recommendation to treat)",
+                                  "Potentially discordant (newly eligible if lifestyle modification trial insufficient)",
+                                  "Potentially discordant (ineligible if lifestyle modification trial successful)",
+                                  "Discordant (no longer has class I recommendation to treat)",
+                                  "Discordant (new class I recommendation to treat)"
+                                  
+                                  
+                                  )
+                                
+                                )]
+
+discordant_df[, prop_pe_ci :=  make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci)]
+discordant_df[, prop_pe_ci_pct :=  make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci)]
+
+```
+
+### Plot
+
+```{r}
+library(legendry)
+discordant_df[, stratum_group := interaction(stratum, group)]
+discordant_df[, stratum_group := factor(stratum_group,
+                                         levels = discordant_df$stratum_group %>%
+                                           unique)]
+
+#Plot
+ggplot(data = discordant_df,
+       aes(y = prop_pe,
+           ymin = prop_lci,
+           ymax = prop_uci,
+           x = stratum_group,
+           fill = value
+           )) +
+  geom_col(position = position_stack(reverse = T),
+           width = 0.7) +
+  #Plot scales
+    scale_x_discrete(name = NULL
+                     ) +
+  scale_y_continuous(name = "Eligible proportion (%)",
+                     breaks = seq(0, 1, 0.05),
+                     expand = c(0, 0),
+                     labels = function(x) (x * 100) 
+                     ) +
+  scale_fill_jama(name = NULL) +
+  guides(x = legendry::guide_axis_nested(key = key_range_auto("\\."))) +
+  #Title
+  ggtitle("Proportion of concordant & discordant class I recommendations for initiating pharmacological treatment according to the 2025 and 2017 ACC/AHA guidelines") +
+    theme_bw() +
+    theme(title = element_text(size = 12, face = "bold"),
+          plot.subtitle = element_text(face = "bold", size = 13, hjust = 0.0, color = "grey45"),
+        text = element_text(size = 14, face = "bold"),
+        axis.title.x = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(size = 18, face = "bold"),
+        axis.text = element_text(size = 16, face = "bold"),
+        legend.position = "bottom",
+        legend.key = element_rect(fill = "transparent"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size = 10, face = "bold"),
+        legend.title = element_text(size = 17, face = "bold"),
+        legend.key.width = unit(2, "cm")
+        ) +
+  coord_cartesian(
+    ylim = c(0, 1.05)
+  ) +
+  guides(fill = guide_legend(nrow = 2)) -> discordance_fig
+
+#Predicted risks
+ggsave(discordance_fig,
+       filename = "Figures/Discordance.pdf",
+       dpi = 600,
+       width = 16, height = 9
+       )
+```
+
+## Initiation by Continuous
+
+###Age
+
+####Model
+
+```{r}
+#Age quantiles for knot placement
+library(rms)
+svyquantile(design = sdata, x = ~ age, quantiles = c(0.05, 0.275, 0.5, 0.725, 0.95))
+
+#Model
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       old_1 ~ rcs(age, c(22, 34, 48, 60, 79))
+) -> m_age_old
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       new_1 ~ rcs(age, c(22, 34, 48, 60, 79))
+) -> m_age_new
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       new_1_mod ~ rcs(age, c(22, 34, 48, 60, 79))
+) -> m_age_new_mod
+
+#Predict
+lapply(list(m_age_old, m_age_new, m_age_new_mod),
+       function(m) {
+         
+         #Sequence of predictors
+         age_seq <- seq(20, 80)
+         #Predict
+         predict(m,
+                 data.frame(age = age_seq)) -> preds
+         
+         #Combine        
+         preds_df <- cbind(preds %>% plogis, preds %>% confint %>% plogis) %>%
+           data.frame
+         
+         #Colnames
+         colnames(preds_df) <- c("prop_pe", "prop_lci", "prop_uci")
+         
+         #Add predictor back
+         preds_df$age <- age_seq
+         
+         #Return
+         preds_df
+       }
+) -> age_preds_df
+rbind(age_preds_df[[1]] %>% mutate(type = "Eligible for immediate treatment by the 2017 ACC/AHA guidelines"),
+      age_preds_df[[2]] %>% mutate(type = "Eligible for treatment by the 2025 ACC/AHA guidelines if lifestyle modification proves insufficient to reduce BP <130/80"),
+      age_preds_df[[3]] %>% mutate(type = "Eligible for immediate treatment by the 2025 ACC/AHA guidelines")) -> age_preds_df
+
+age_preds_df <- data.table(age_preds_df)
+
+```
+
+####Plot
+
+```{r}
+ggplot(data = age_preds_df,
+       aes(x = age, 
+           y = prop_pe,
+           ymin = prop_lci,
+           ymax = prop_uci,
+           color = type,
+           fill = type)
+) +
+  #Geoms
+  geom_line(lwd = 1.75) +
+  geom_point(size = 4) +
+  geom_ribbon(alpha = 0.035, color = "transparent") +
+  ggtitle(label = "Proportion of US adults eligible for initiating pharmacological treatment of hypertension (among those reporting no current pharmacological treatment), according to age") +
+  geom_density(data = data[age >= 20], kernel = "gaussian", adjust = 1,
+               bounds = c(20, 80),
+              inherit.aes = F, alpha = 0.1, color = "black", fill = "orange3",
+              aes(x = age, weight = weight, y = ..density..*10)
+  ) +
+  #Scales
+  scale_color_jama(name = NULL) +
+  scale_fill_jama(name = NULL) +
+  scale_x_continuous(name = "Age (years)",
+                     breaks = seq(0, 100, 5)
+  ) +
+  scale_y_continuous(name = "Eligible proportion (%)",
+                     labels = function(x) x * 100,
+                     breaks = seq(0, 100, 5)/100
+  ) +
+      theme_bw() +
+    theme(title = element_text(size = 11, face = "bold"),
+          plot.subtitle = element_text(face = "bold", size = 11, hjust = 0.0, color = "grey45"),
+        text = element_text(size = 14, face = "bold"),
+        axis.title.x = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 16, face = "bold"),
+        legend.position = c(0.35, 0.9),
+        legend.key = element_rect(fill = "transparent"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.title = element_text(size = 17, face = "bold"),
+        legend.key.width = unit(2, "cm")
+        ) +
+  coord_cartesian(ylim = c(0, 0.75)) -> age_cont_fig
+
+ggsave(age_cont_fig,
+       filename = "Figures/Age continuous.pdf",
+       dpi = 600, width = 16, height = 9)
+
+```
+
+###BMI
+
+####Model
+
+```{r}
+
+
+svyquantile(design = sdata, x = ~ bmi, quantiles = c(0.05, 0.275, 0.5, 0.725, 0.95))
+# Models using BMI with restricted cubic splines
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       old_1 ~ rcs(bmi, c(20, 25, 29, 33, 44))
+) -> m_bmi_old
+
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       new_1 ~ rcs(bmi, c(20, 25, 29, 33, 44))
+) -> m_bmi_new
+
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       new_1_mod ~ rcs(bmi, c(20, 25, 29, 33, 44))
+) -> m_bmi_new_mod
+
+# Predictions across BMI
+lapply(list(m_bmi_old, m_bmi_new, m_bmi_new_mod),
+       function(m) {
+         
+         # Sequence of predictors
+         bmi_seq <- seq(18, 45, by = 0.5)
+         
+         # Predict
+         predict(m,
+                 newdata = data.frame(bmi = bmi_seq),
+                 se.fit = TRUE) -> preds
+         
+         #Combine        
+         preds_df <- cbind(preds %>% plogis, preds %>% confint %>% plogis) %>%
+           data.frame
+         
+         colnames(preds_df) <- c("prop_pe", "prop_lci", "prop_uci")
+         
+         preds_df$bmi <- bmi_seq
+         
+         preds_df
+       }
+) -> bmi_preds_df
+
+
+# Bind together with labels
+rbind(bmi_preds_df[[1]] %>% mutate(type = "Eligible for immediate treatment by the 2017 ACC/AHA guidelines"),
+      bmi_preds_df[[2]] %>% mutate(type = "Eligible for treatment by the 2025 ACC/AHA guidelines if lifestyle modification proves insufficient to reduce BP <130/80"),
+      bmi_preds_df[[3]] %>% mutate(type = "Eligible for immediate treatment by the 2025 ACC/AHA guidelines"))  -> bmi_preds_df
+bmi_preds_df <- data.table(bmi_preds_df)
+```
+
+####Plot
+
+```{r}
+ggplot(data = bmi_preds_df,
+       aes(x = bmi, 
+           y = prop_pe,
+           ymin = prop_lci,
+           ymax = prop_uci,
+           color = type,
+           fill = type)
+) +
+  #Geoms
+  geom_line(lwd = 1.75) +
+  geom_point(size = 4) +
+  geom_ribbon(alpha = 0.035, color = "transparent") +
+  ggtitle(label = "Proportion of US adults eligible for initiating pharmacological treatment of hypertension (among those reporting no current pharmacological treatment), according to BMI") +
+  geom_density(data = data[age >= 20 & bmi %between% c(18, 45)], kernel = "gaussian", adjust = 1,
+              inherit.aes = F, alpha = 0.1, color = "black", fill = "orange3",
+              bounds = c(18, 45),
+              aes(x = bmi, weight = weight, y = ..density..*2)
+  ) +
+  #Scales
+  scale_color_jama(name = NULL) +
+  scale_fill_jama(name = NULL) +
+  scale_x_continuous(name = "BMI (kg/m²)",
+                     expand = c(0.02, 0),
+                     breaks = seq(0, 100, 2)
+  ) +
+  scale_y_continuous(name = "Eligible proportion (%)",
+                     labels = function(x) x * 100,
+                     breaks = seq(0, 100, 5)/100
+  ) +
+      theme_bw() +
+    theme(title = element_text(size = 11, face = "bold"),
+          plot.subtitle = element_text(face = "bold", size = 11, hjust = 0.0, color = "grey45"),
+        text = element_text(size = 14, face = "bold"),
+        axis.title.x = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 16, face = "bold"),
+        legend.position = c(0.35, 0.94),
+        legend.key = element_rect(fill = "transparent"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.title = element_text(size = 17, face = "bold"),
+        legend.key.width = unit(2, "cm")
+        ) +
+  coord_cartesian(ylim = c(0, 0.45),
+                  xlim = c(18, 45)) -> bmi_cont_fig
+
+ggsave(bmi_cont_fig,
+       filename = "Figures/BMI continuous.pdf",
+       dpi = 600, width = 16, height = 9)
+```
+
+##Age BMI combined
+
+###Model
+
+```{r}
+
+#Model
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       old_1 ~ rcs(age, c(22, 34, 48, 60, 79))*rcs(bmi, c(20, 25, 29, 33, 44))
+) -> m_age_bmi_old
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       new_1 ~ rcs(age, c(22, 34, 48, 60, 79))*rcs(bmi, c(20, 25, 29, 33, 44))
+) -> m_age_bmi_new
+
+#Predict
+lapply(list(m_age_bmi_old, m_age_bmi_new),
+       function(m) {
+         
+         #Sequence of predictors
+         age_bmi_seq <- expand.grid(age = seq(20, 80), bmi = seq(18, 45, 0.5))
+         #Predict
+         predict(m,
+                 age_bmi_seq) -> preds
+         
+         #Combine        
+         preds_df <- cbind(preds %>% plogis, preds %>% confint %>% plogis) %>%
+           data.frame
+         
+         #Colnames
+         colnames(preds_df) <- c("prop_pe", "prop_lci", "prop_uci")
+         
+         #Add predictor back
+         preds_df$age <- age_bmi_seq$age
+         preds_df$bmi <- age_bmi_seq$bmi
+         
+         #Return
+         preds_df
+       }
+) -> age_bmi_preds_df
+
+age_bmi_preds_df[[3]] <- data.table(
+  diff_pe = age_bmi_preds_df[[2]]$prop_pe - age_bmi_preds_df[[1]]$prop_pe,
+ age =  age_bmi_preds_df[[2]]$age, bmi = age_bmi_preds_df[[2]]$bmi
+)
+
+```
+
+###Plot
+
+#### V1
+
+```{r}
+
+label_size <- 8
+#Plot
+ggplot(data = age_bmi_preds_df[[3]],
+       aes(x = age,
+           y = bmi,
+           fill = diff_pe*100,
+           z = diff_pe*100)
+) +
+  #Geom
+  geom_raster(interpolate = T) +
+  geom_contour(breaks = c(-10, 0, 10, 20, 30), lwd = 1.5, color = "black") +
+  #Annotate
+    annotate(geom = "text",
+           x = 44, y = 44, size = label_size, fontface = "bold",
+           label = "+30% or more") +
+  annotate(geom = "text",
+           x = 46, y = 34, size = label_size, fontface = "bold",
+           label = "+20% or 30%") +
+  annotate(geom = "text",
+           x = 46, y = 23, size = label_size, fontface = "bold",
+           label = "+10% to 20%") +
+  annotate(geom = "text",
+           x = 30, y = 26, size = label_size, fontface = "bold",
+           label = "+1% to 10%") +
+  annotate(geom = "text",
+           x = 64, y = 26, size = label_size, fontface = "bold",
+           label = "+1% to 10%") +
+  annotate(geom = "text",
+           x = 21, y = 26, size = label_size, fontface = "bold",
+           label = "-1%\nto\n10%") +
+  annotate(geom = "text",
+           x = 76.5, y = 27, size = label_size, fontface = "bold",
+           label = "-1% to 10%") +
+  #Scales
+  scale_x_continuous(expand = c(0, 0),
+                     breaks = seq(0, 100, 2),
+                     name = "Age (years)") +
+  scale_y_continuous(expand = c(0, 0),
+                     breaks = seq(0, 100, 2),
+                     name = "BMI (kg/m²)") +
+  scale_fill_gradientn(colors = hcl.colors(9, "RdYlGn", rev = T),
+                       breaks = seq(-5, 30, 5),
+                       name = "Estimated difference in eligibility (%)") +
+  theme_grey() +
+  theme(
+    #bold font for legend text
+    legend.text=element_text(size = 20,
+                             face="bold"),
+    legend.title =element_text(size = 20,
+                               face="bold"),
+    #set thickness of axis ticks
+    axis.ticks=element_line(size=0.4),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank(),
+    axis.text.x = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 18, face = "bold"),
+    axis.title.x = element_text(size = 25, face = "bold"),
+    axis.title.y = element_text(size = 20, face = "bold"),
+    legend.position = "bottom",
+    legend.key.width = unit(4, "cm")
+  ) +
+  guides(fill = guide_coloursteps(ticks = TRUE, ticks.colour = "black", 
+                                  frame.colour = "black", 
+                                  ticks.linewidth = 4,
+  )) -> age_bmi_diff_heatmap_fig
+#Plot
+ggsave(age_bmi_diff_heatmap_fig,
+       filename = paste0("Figures/Age BMI Difference Heatmap.pdf"),
+       width = 16, height = 9,
+       dpi = 600)
+  
+```
+
+#### V2
+
+```{r}
+
+label_size <- 8
+age_bmi_preds_df[[3]][, diff_pe_label := paste0(r1(100*diff_pe), "%")]
+age_bmi_preds_df[[3]][, diff_pe_label := fifelse(diff_pe > 0, paste0("+", diff_pe_label), diff_pe_label)]
+
+#Plot
+ggplot(data = age_bmi_preds_df[[3]][bmi %in% seq(20, 45, 5) & age %in% seq(20, 80, 5)],
+       aes(x = age,
+           y = bmi,
+           fill = diff_pe*100,
+           z = diff_pe*100)
+) +
+  #Geom
+  geom_tile(color = "black", lwd = 1) +
+  geom_text(aes(label = diff_pe_label),
+            size = 7, fontface = "bold"
+            ) +
+  #Scales
+  scale_x_continuous(expand = c(0, 0),
+                     breaks = seq(0, 100, 5),
+                     name = "Age (years)") +
+  scale_y_continuous(expand = c(0, 0),
+                     breaks = seq(0, 100, 5),
+                     name = "BMI (kg/m²)") +
+  scale_fill_gradientn(colors = hcl.colors(9, "RdYlGn", rev = F),
+                       breaks = seq(-5, 30, 5),
+                       name = "Estimated difference in eligibility (%)") +
+  #Theme
+  theme_grey() +
+  theme(
+    #bold font for legend text
+    legend.text=element_text(size = 20,
+                             face="bold"),
+    legend.title =element_text(size = 20,
+                               face="bold"),
+    #set thickness of axis ticks
+    axis.ticks=element_line(size=0.4),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank(),
+    axis.text.x = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 18, face = "bold"),
+    axis.title.x = element_text(size = 25, face = "bold"),
+    axis.title.y = element_text(size = 20, face = "bold"),
+    legend.position = "bottom",
+    legend.key.width = unit(4, "cm")
+  ) +
+  guides(fill = guide_coloursteps(ticks = TRUE, ticks.colour = "black", 
+                                  frame.colour = "black", 
+                                  ticks.linewidth = 4,
+  )) -> age_bmi_diff_heatmap_fig
+#Plot
+ggsave(age_bmi_diff_heatmap_fig,
+       filename = paste0("Figures/Age BMI Difference Heatmap - V2.pdf"),
+       width = 16, height = 9,
+       dpi = 600)
+  
+```
+
+## Sex/race
+
+```{r}
+#Sex/race after adjusting for age
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       discordant ~ rcs(age, c(22, 34, 48, 60, 79)) + race
+) %>% regTermTest("race") -> race_p
+
+svyglm(design = sdata %>% subset(htn_meds_take == "no"),
+       family = binomial,
+       discordant ~ rcs(age, c(22, 34, 48, 60, 79)) + sex
+) %>% regTermTest("sex") -> sex_p
+
+```
+
+## Eligible for intensification
+
+###Modify function
+
+```{r}
+get_svytotals_mod <- function(design = sdata, var, n_cats = 2) {
+#Get total number of eligible patients (10%+) according to PREVENT
+list(
+  #Overall
+  " " = svytotal_df(design = design, 
+                    variables = var) %>% mutate(group = "Overall"),
+  #Age-stratified
+  "Below 65" = svytotal_df(design = subset(design, age < 65), 
+                        variables = var) %>% mutate(group = "Age (years)"),
+  "65 or older" = svytotal_df(design = subset(design, age >= 65), 
+                        variables = var) %>% mutate(group = "Age (years)"),
+  #Sex-stratified
+  "Female" = svytotal_df(design = subset(design, sex == "female"), 
+                         variables = var) %>% mutate(group = "Sex"),
+  "Male" = svytotal_df(design = subset(design, sex == "male"), 
+                       variables = var) %>% mutate(group = "Sex"),
+  #Race-stratified
+  "NH Black" = svytotal_df(design = subset(design,  race == "Non-Hispanic Black"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  "NH White" = svytotal_df(design = subset(design,  race == "Non-Hispanic White"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  "NH Asian" = svytotal_df(design = subset(design, race == "Non-Hispanic Asian"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  "Hispanic" = svytotal_df(design = subset(design, race == "Hispanic"), 
+                           variables = var) %>% mutate(group = "Race and ethnicity"),
+  #Comorbidities
+  "CKD" = svytotal_df(design = subset(design, ckd == "yes"), 
+                               variables = var) %>% mutate(group = "Comorbidities"),
+  "CVD" = svytotal_df(design = subset(design, cvd == "yes"), 
+                               variables = var) %>% mutate(group = "Comorbidities"),
+  "Obesity" = svytotal_df(design = subset(design, obesity == "yes"), 
+                          variables = var) %>% mutate(group = "Comorbidities"),
+  "Diabetes" = svytotal_df(design = subset(design, dm == "yes"), 
+                           variables = var) %>% mutate(group = "Comorbidities"),
+  "Higher risk" = svytotal_df(design = subset(design, prevent_10yr >= 0.075), 
+                               variables = var) %>% mutate(group = "10-year ASCVD risk"),
+  "Lower risk" = svytotal_df(design = subset(design, prevent_10yr < 0.075), 
+                               variables = var) %>% mutate(group = "10-year ASCVD risk")
+) %>% 
+  #Bind together
+  {data.table(rbindlist(.) %>% select(-var),
+              stratum = names(.) %>% rep(each = n_cats))} -> df
+  
+}
+
+
+```
+
+### Get numbers
+
+```{r}
+get_svytotals_mod(design = subset(sdata, htn_meds_take == "yes"),
+              var = ~ bp_cat, 
+              n_cats = 3) -> new_bp_cat_df
+get_svytotals_mod(design = subset(sdata, htn_meds_take == "yes" & survey_cycle == 66),
+              var = ~ bp_cat, 
+              n_cats = 3) -> new_bp_cat_df_2017_2020
+
+```
+
+### Plot
+
+```{r}
+library(legendry)
+new_bp_cat_df[, stratum_group := interaction(stratum, group %>% paste0("."))]
+new_bp_cat_df[stratum == " ", stratum := "Overall"]
+new_bp_cat_df[stratum == "Overall", group := ""]
+new_bp_cat_df[, stratum_group := factor(stratum_group,
+                                         levels = new_bp_cat_df$stratum_group %>%
+                                           unique %>% rev)]
+new_bp_cat_df[, value := factor(value, levels = levels(data$bp_cat))]
+
+#Create geom_text aestetics
+new_bp_cat_df[, geom_text_pos := c(0, prop_pe[1], prop_pe[1] + prop_pe[2]), 
+              by = stratum]
+new_bp_cat_df[, geom_text_label := 
+                paste0(percent(prop_pe, 0.1), " (", tomil(pe), "m)")]
+
+#Angles vector
+angles_vector <- c(0)
+
+
+
+#Plot
+ggplot(data = new_bp_cat_df,
+       aes(x = prop_pe,
+           ymin = prop_lci,
+           ymax = prop_uci,
+           y = stratum_group,
+           fill = value
+           )) +
+  geom_col(position = position_stack(reverse = T),
+           width = 0.7,
+           color = "black") +
+  geom_text(hjust = -0.1, fontface = "bold", size = 5,
+            aes(x = geom_text_pos,
+                label = geom_text_label)) +
+  #Plot scales
+    scale_y_discrete(name = NULL) +
+  scale_x_continuous(name = "Eligible proportion (%)",
+                     breaks = seq(0, 1, 0.05),
+                     expand = c(0, 0),
+                     labels = function(x) (x * 100),
+                     sec.axis = dup_axis(name = NULL)
+                     ) +
+  scale_fill_tableau(name = NULL,
+                     labels = c("SBP above 130 mmHg or DBP above 80 mmHg\n(Intensification to reach <130/80 is recommended)",
+                                "SBP above 120 mmHg\n(Intensification to reach <120/80 is preferred)",
+                                "SBP/DBP <120/80 mmHg")) +
+  guides(y = legendry::guide_axis_nested(key = key_range_auto("\\."))) +
+  #Title
+  ggtitle("Blood pressure control among US adults being treated for hypertension according to the 2025 ACC/AHA guidelines") +
+    theme_bw() +
+    theme(title = element_text(size = 13, face = "bold"),
+          plot.subtitle = element_text(face = "bold", size = 11, hjust = 0.0, color = "grey45"),
+        text = element_text(size = 14, face = "bold"),
+        axis.title.x = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(size = 14, face = "bold"),
+        axis.text.y = element_text(angle = angles_vector, size = 14, face = "bold"),
+        legend.position = "bottom",
+        legend.key = element_rect(fill = "transparent"),
+        legend.background = element_rect(fill = "transparent"),
+        legend.text = element_text(size = 12, face = "bold"),
+        legend.title = element_text(size = 17, face = "bold"),
+        legend.key.width = unit(2, "cm")
+        ) +
+  coord_cartesian(
+    xlim = c(0, 1.01)
+  ) +
+  guides(fill = guide_legend(nrow = 1)) -> intensification_prop_fig
+
+
+#Predicted risks
+ggsave(intensification_prop_fig,
+       filename = "Figures/Intensification goals - n.pdf",
+       dpi = 600,
+       width = 16, height = 9
+       )
+```
+
+
+###Tabulate
+
+```{r}
+
+new_bp_cat_df[, prop_pe_ci := make_prop_pe_ci(prop_pe, prop_lci, prop_uci)]
+new_bp_cat_df[, prop_pe_ci_pct := make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci)]
+new_bp_cat_df_2017_2020[, prop_pe_ci_pct := make_prop_pe_ci_pct(prop_pe, prop_lci, prop_uci)]
+new_bp_cat_df[, pe_ci := make_pe_ci_mil(pe, lci, uci)]
+
+
+flextable(new_bp_cat_df[, .(`Variable` = group,
+                            `Strata` = stratum,
+                            `Blood pressure category` = value,
+                            `Proportion [95% CI], %` = prop_pe_ci,
+                            `Number [95% CI], millions` = pe_ci)]) %>%
+  bold(j = c(1, 2)) %>%
+  flextable_aes(table_title = "Table 2. US adults receiving pharmacological treatment for hypertension, according to 2025 ACC/AHA treatment goal.") %>%
+  merge_v() %>%
+  add_footer_lines(values = as_paragraph(abbs_line)) %>%
+  save_as_docx(path = "Tables/Table 2.docx")
+  
+
+```
+
+##Variables by discordance
+
+###Functions
+
+```{r}
+mean_t_fn <- function(mean_var, subset_var, subset_options) {
+  lapply(subset_options,
+           function(i)
+           svymean_df(design = sdata %>%
+                        subset(htn_meds_take == "no") %>%
+                        subset(get(subset_var) == i), mean_var)[, pe_ci]
+           ) 
+}
+
+prop_t_fn <- function(prop_var, subset_var, subset_options, wanted_value) {
+  lapply(subset_options,
+         function(i)
+           svytotal_df(design = sdata %>%
+                        subset(htn_meds_take == "no") %>%
+                         subset(get(subset_var) == i), prop_var)[value == wanted_value, prop_pe_ci]
+  ) 
+  
+}
+
+```
+
+###New_mod
+```{r}
+#Old_1_new_1_mod options
+old_1_new_1_mod_options <- data[, unique(old_1_new_1_mod) %>% unique %>% na.omit]
+
+
+#Produce list
+list(
+  #Age
+  c("Age (years)",
+    mean_t_fn(mean_var = ~ age, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  #Sex
+  c("Women (%)",
+    prop_t_fn(prop_var = ~ sex,
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options,
+              wanted_value = "female")),
+  #Race
+  c("Race/ethnicity (%)", "", "", ""),
+  cbind(
+    svytotal_df(sdata %>% subset(old_1_new_1_mod == "no.no"), ~ race)[, .(paste0("   ", value), prop_pe_ci)],
+    svytotal_df(sdata %>% subset(old_1_new_1_mod == "yes.yes"), ~ race)[, .(prop_pe_ci)],
+    svytotal_df(sdata %>% subset(old_1_new_1_mod == "yes.no"), ~ race)[, .(prop_pe_ci)]) %>%
+    t %>% c,
+  #Parameters
+  #SBP
+  c("Systolic blood pressure (mm Hg)",
+    mean_t_fn(mean_var = ~ sbp, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  #DBP
+  c("Diastolic blood pressure (mm Hg)",
+    mean_t_fn(mean_var = ~ dbp, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  #BMI
+  c("BMI (kg/m²)",
+    mean_t_fn(mean_var = ~ bmi, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  #HbA1c
+  c("HbA1c (%)",
+    mean_t_fn(mean_var = ~ hba1c, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  #Total cholesterol
+  c("Total cholesterol (mg/dL)",
+    mean_t_fn(mean_var = ~ tc, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  #Total cholesterol
+  c("Total cholesterol (mg/dL)",
+    mean_t_fn(mean_var = ~ tc, 
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options)
+  ),
+  c("Non-HDL cholesterol (mg/dL)",
+    mean_t_fn(mean_var = ~ eval(tc - hdl), 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #CV RFs
+  c("Cardiovascular risk factors (%)", " ", " ", " "),
+  c("   Obesity (%)",
+    prop_t_fn(prop_var = ~ obesity,
+              subset_var = "old_1_new_1_mod", 
+              subset_options = old_1_new_1_mod_options,
+              wanted_value = "yes")),
+  c("   Diabetes (%)",
+  svytotal_df(sdata %>% subset(old_1_new_1_mod == "no.no"), ~ dm)[value == "yes", prop_pe_ci],
+  svytotal_df(sdata %>% subset(old_1_new_1_mod == "yes.yes"), ~ dm)[value == "yes", prop_pe_ci],
+  "N/A"),
+c("   Chronic kidney disease (%)",
+  svytotal_df(sdata %>% subset(old_1_new_1_mod == "no.no"), ~ ckd)[value == "yes", prop_pe_ci],
+  svytotal_df(sdata %>% subset(old_1_new_1_mod == "yes.yes"), ~ ckd)[value == "yes", prop_pe_ci],
+  "N/A"),
+c("   CVD (%)",
+  svytotal_df(sdata %>% subset(old_1_new_1_mod == "no.no"), ~ cvd)[value == "yes", prop_pe_ci],
+  svytotal_df(sdata %>% subset(old_1_new_1_mod == "yes.yes"), ~ cvd)[value == "yes", prop_pe_ci],
+  "N/A")
+) %>%
+  unlist %>%
+#Morph into a table
+matrix(.,
+       ncol = 4,
+       byrow = T) %>%
+  data.table -> disc_t_rfs_new_mod
+
+#Name columns
+setnames(disc_t_rfs_new_mod,
+                  c("Variable", "Ineligible by both guidelines",
+                          "Eligible by both guidelines",
+                          "Ineligible by new guidelines")
+         )
+disc_t_rfs_new_mod
+```
+
+###New
+```{r}
+#Old_1_new_1 options
+old_1_new_1_options <- data[, unique(old_1_new_1) %>% unique %>% na.omit]
+#Produce list
+list(
+  #Age
+  c("Age (years)",
+    mean_t_fn(mean_var = ~ age, 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #Sex
+  c("Women (%)",
+    prop_t_fn(prop_var = ~ sex,
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options,
+              wanted_value = "female")),
+  #Race
+  c("Race/ethnicity (%)", "", "", ""),
+  cbind(
+    svytotal_df(sdata %>% subset(old_1_new_1 == "no.no"), ~ race)[, .(paste0("   ", value), prop_pe_ci)],
+    svytotal_df(sdata %>% subset(old_1_new_1 == "yes.yes"), ~ race)[, .(prop_pe_ci)],
+    svytotal_df(sdata %>% subset(old_1_new_1 == "no.yes"), ~ race)[, .(prop_pe_ci)]) %>%
+    t %>% c,
+  #Parameters
+  #SBP
+  c("Systolic blood pressure (mm Hg)",
+    mean_t_fn(mean_var = ~ sbp, 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #DBP
+  c("Diastolic blood pressure (mm Hg)",
+    mean_t_fn(mean_var = ~ dbp, 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #BMI
+  c("BMI (kg/m²)",
+    mean_t_fn(mean_var = ~ bmi, 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #HbA1c
+  c("HbA1c (%)",
+    mean_t_fn(mean_var = ~ hba1c, 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #Total cholesterol
+  c("Total cholesterol (mg/dL)",
+    mean_t_fn(mean_var = ~ tc, 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  c("Non-HDL cholesterol (mg/dL)",
+    mean_t_fn(mean_var = ~ eval(tc - hdl), 
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options)
+  ),
+  #CV RFs
+  c("Cardiovascular risk factors (%)", " ", " ", " "),
+  c("   Obesity (%)",
+    prop_t_fn(prop_var = ~ obesity,
+              subset_var = "old_1_new_1", 
+              subset_options = old_1_new_1_options,
+              wanted_value = "yes")),
+  c("   Diabetes (%)",
+    svytotal_df(sdata %>% subset(old_1_new_1 == "no.no"), ~ dm)[value == "yes", prop_pe_ci],
+    svytotal_df(sdata %>% subset(old_1_new_1 == "yes.yes"), ~ dm)[value == "yes", prop_pe_ci],
+    "N/A"),
+  c("   Chronic kidney disease (%)",
+    svytotal_df(sdata %>% subset(old_1_new_1 == "no.no"), ~ ckd)[value == "yes", prop_pe_ci],
+    svytotal_df(sdata %>% subset(old_1_new_1 == "yes.yes"), ~ ckd)[value == "yes", prop_pe_ci],
+    "N/A"),
+  c("   CVD (%)",
+    svytotal_df(sdata %>% subset(old_1_new_1 == "no.no"), ~ cvd)[value == "yes", prop_pe_ci],
+    svytotal_df(sdata %>% subset(old_1_new_1 == "yes.yes"), ~ cvd)[value == "yes", prop_pe_ci],
+    "N/A")
+) %>%
+  unlist %>%
+  #Morph into a table
+  matrix(.,
+         ncol = 4,
+         byrow = T) %>%
+  data.table -> disc_t_rfs_new
+
+#Name columns
+setnames(disc_t_rfs_new,
+         c("Variable", "Ineligible by both guidelines",
+           "Eligible by both guidelines",
+           "Discordant")
+)
+disc_t_rfs_new
+
+```
+
+###Combine
+
+```{r}
+rbind(
+  data.table(Variable = "Assuming life-style changes are sufficient for lower-risk stage 1 hypertension") %>%
+  rbind(., disc_t_rfs_new_mod, fill = T) %>%
+    rbind(., 
+          data.table(Variable = "Assuming life-style changes are insufficient for lower-risk stage 1 hypertension"),
+          fill = T) %>%
+    rbind(.,
+          data.table(Variable = "",
+                     `Ineligible by both guidelines` = "Ineligible by both guidelines",
+                     `Eligible by both guidelines` = "Eligible by both guidelines",
+                     `Discordant` = "Eligible by new but not old guidelines"
+                     )
+          ),
+  disc_t_rfs_new
+) -> disc_t_rfs
+
+
+
+
+disc_t_rfs %>%
+  flextable %>%
+bold(j = c(1)) %>%
+  flextable_aes(table_title = "Table X. US adults receiving pharmacological treatment for hypertension, according to 2025 ACC/AHA treatment goal.") %>%
+  merge_v() %>%
+  add_footer_lines(values = as_paragraph("Values are presented as survey-weighted means (for continuous variables) and proportions (for categorical variables) with 95% confidence intervals.")) %>%
+  save_as_docx(path = "Tables/Table X.docx")
+
+
+```
+
+# Save
+
+```{r}
+inclusion <- expr(age >= 20 & !is.na(new_1) & !is.na(old_1))
+save(
+  #Datasets
+  data, sdata,
+  #Datapoints
+  old_1_df, new_1_df, new_1_mod_df,
+  discordant_df, new_bp_cat_df, new_bp_cat_df_2017_2020,
+  abs_diff_init_df,
+  age_preds_df, bmi_preds_df, age_bmi_preds_df,
+  race_p, sex_p,
+  inclusion,
+   #Figures
+  eligible_prop_fig, intensification_prop_fig,
+  discordance_fig, age_cont_fig, bmi_cont_fig, age_bmi_diff_heatmap_fig,
+   #File
+   file = "Rendering Data.RData")
+
+```
