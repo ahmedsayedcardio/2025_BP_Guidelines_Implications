@@ -524,7 +524,7 @@ folders_dfs <- list(
   c("Insurance", "insurance")
 )
 
-#Get NHANES directory
+#Get NHANES directory (INSERT YOUR OWN HERE)
 nhanes_dir <- "C:/Ahmed's Stuff/ResearchStuff/NHANES_Data/"
 
 #Lapply to import NHANES data for a given set of variables
@@ -2359,3 +2359,4 @@ save(
    file = "Rendering Data.RData")
 
 ```
+
